@@ -1,20 +1,27 @@
-PROG    = bto_advanced_USBIR_cmd
-LOCAL_BIN_DIR = /usr/local/bin
-CC      = cc
-OBJS    = ${PROG}.o
+PROG = bto_advanced_USBIR_cmd
+OBJS = $(PROG).o
+PREFIX ?= /usr/local
+LOCAL_BIN_DIR ?= $(PREFIX)/bin
+bindir ?= $(LOCAL_BIN_DIR)
+CFLAGS ?= -O2 -Wall
+LDLIBS += -lusb-1.0
 
-${PROG}: $(OBJS)
-	$(CC) -Wall -o $@ $(OBJS) -lusb-1.0 
+.PHONY: all clean install uninstall
 
-.c.o:
-	$(CC) -Wall -c $<
+all: $(PROG)
+
+$(PROG): $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+
+$(OBJS): $(PROG).c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS)
-	rm -f ${PROG}
+	$(RM) $(OBJS) $(PROG)
 
-install:
-	install -s -p -m 4755 ${PROG} ${LOCAL_BIN_DIR}
+install: $(PROG)
+	install -d "$(DESTDIR)$(bindir)"
+	install -m 0755 $(PROG) "$(DESTDIR)$(bindir)/$(PROG)"
 
 uninstall:
-	rm -rf ${LOCAL_BIN_DIR}/${PROG}
+	$(RM) "$(DESTDIR)$(bindir)/$(PROG)"

@@ -26,10 +26,10 @@ $ bto_advanced_USBIR_cmd --Plarail_Speed_UpAF
 移植作業者: disklessfun@gmail.com
 
 */
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <libusb-1.0/libusb.h>
 #include <getopt.h>
@@ -44,9 +44,6 @@ $ bto_advanced_USBIR_cmd --Plarail_Speed_UpAF
 typedef unsigned char byte;
 typedef unsigned int uint;
 typedef unsigned short ushort;
-typedef unsigned char bool;
-#define true	1
-#define false	0
 
 #define BUFF_SIZE 64
 #define FORMAT_NUM 4
@@ -154,8 +151,6 @@ libusb_device_handle* open_device(libusb_context *ctx) {
   int i = 0;
   int cnt = 0;
 
-  libusb_set_debug(ctx, 3);
-  
   if ((libusb_get_device_list(ctx, &devs)) < 0) {
     perror("no usb device found");
     exit(1);
@@ -165,13 +160,16 @@ libusb_device_handle* open_device(libusb_context *ctx) {
   while ((dev = devs[i++]) != NULL) {
     struct libusb_device_descriptor desc;
     if (libusb_get_device_descriptor(dev, &desc) < 0) {
-      perror("failed to get device descriptor\n");
+      fprintf(stderr, "failed to get USB device descriptor\n");
+      continue;
     }
     /* count how many device connected */
     if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
       cnt++;
     }
   }
+
+  libusb_free_device_list(devs, 1);
 
   /* device not found */
   if (cnt == 0) {
@@ -186,9 +184,9 @@ libusb_device_handle* open_device(libusb_context *ctx) {
 
 
   /* open device */
-  if ((devh = libusb_open_device_with_vid_pid(ctx, VENDOR_ID, PRODUCT_ID)) < 0) {
-    perror("can't find device\n");
-    close_device(ctx, devh);
+  if ((devh = libusb_open_device_with_vid_pid(ctx, VENDOR_ID, PRODUCT_ID)) == NULL) {
+    fprintf(stderr, "cannot open USB device\n");
+    libusb_exit(ctx);
     exit(1);
   } 
 
@@ -205,7 +203,7 @@ libusb_device_handle* open_device(libusb_context *ctx) {
 
   r = libusb_claim_interface(devh, 3);
   if (r < 0) {
-    fprintf(stderr, "claim interface failed (%d): %s\n", r, strerror(errno));
+    fprintf(stderr, "claim interface failed (%d): %s\n", r, libusb_error_name(r));
     exit(1);
   }
 
@@ -292,16 +290,14 @@ void version(char *fname) {
 int main(int argc, char *argv[]) {
   libusb_context *ctx = NULL;
   int ret = 1;
-  struct option *options;
+  struct option options[OPTION_NUM];
   int option_index;
   int freq_flag = 0;
   int type_flag = 0;
-  char type_arg[20] = "\0";
+  const char *type_arg = NULL;
   int code_flag = 0;
   int Code_flag = 0;
-  char Code_arg[600] = "\0";
-  char hex_buff[5] = "\0";
-  int str_len = 0;
+  const char *Code_arg = NULL;
   int data_flag = 0;
   int pla_flag = 0;
   int read_flag = 0;
@@ -309,16 +305,15 @@ int main(int argc, char *argv[]) {
   int get_flag = 0;
   int firm_flag = 0;
   char *s;
-  byte *data = NULL;
+  byte data[MAX_BYTE_ARRAY_SIZE] = {0};
   uint dataCount = 0;
-  byte *code = NULL;
+  byte code[IR_SEND_DATA_MAX_LEN];
   uint codeCount = 0;
   char *endPtr;
-  int placounter = 0, plaindex;
+  int placounter = 0, plaindex = 0;
   int fi, typeindex = -1;
   uint ibit_len = 0;
 
-  options = malloc(sizeof(struct option) * OPTION_NUM);
   setup_optargs(options);
   while ((ret = getopt_long(argc, argv, "f:t:c:C:d:rsgh", options, &option_index)) != -1)
   {
@@ -336,42 +331,53 @@ int main(int argc, char *argv[]) {
         firm_flag = 1;
         break;
       case 'd':
-        data_flag = 1;
-          while((s = strtok(optarg, ", ")) != NULL)
-          {
-             optarg = NULL;
-             if(data != NULL){
-               data = realloc(data, dataCount + 1);
-             }else{
-               data = malloc(dataCount + 1);
-             }
-             data[dataCount++] = (byte)strtol(s, &endPtr, 0);
-          }
-        break;
       case 'c':
-        code_flag = 1;
-          while((s = strtok(optarg, ", ")) != NULL)
+      {
+        byte *bytes = ret == 'd' ? data : code;
+        uint *count = ret == 'd' ? &dataCount : &codeCount;
+        size_t capacity = ret == 'd' ? sizeof(data) : sizeof(code);
+
+        if (ret == 'd')
+          data_flag = 1;
+        else
+          code_flag = 1;
+
+        for (s = strtok(optarg, ", "); s != NULL; s = strtok(NULL, ", "))
+        {
+          errno = 0;
+          long value = strtol(s, &endPtr, 0);
+          if (errno == ERANGE || endPtr == s || *endPtr != '\0' ||
+              value < 0 || value > 255 || *count >= capacity)
           {
-             optarg = NULL;
-             if(code != NULL){
-               code = realloc(code, codeCount + 1);
-             }else{
-               code = malloc(codeCount + 1);
-             }
-             code[codeCount++] = (byte)strtol(s, &endPtr, 0);
+            fprintf(stderr, "エラー: -%c のデータが不正または長すぎます: %s\n", ret, s);
+            return 1;
           }
+          bytes[(*count)++] = (byte)value;
+        }
         break;
+      }
       case 'C':
         Code_flag = 1;
-        strcpy(Code_arg, optarg);
+        Code_arg = optarg;
         break;
       case 'f':
+      {
+        errno = 0;
+        long value = strtol(optarg, &endPtr, 10);
+        if (errno == ERANGE || endPtr == optarg || *endPtr != '\0' ||
+            value < IR_FREQ_MIN || value > IR_FREQ_MAX)
+        {
+          fprintf(stderr, "エラー: 周波数は %d～%d Hz で指定して下さい。\n",
+                  IR_FREQ_MIN, IR_FREQ_MAX);
+          return 1;
+        }
         freq_flag = 1;
-        frequency = atoi(optarg);
+        frequency = (uint)value;
         break;
+      }
       case 't':
         type_flag = 1;
-        strcpy(type_arg, optarg);
+        type_arg = optarg;
         break;
       case 'r':
         read_flag = 1;
@@ -434,7 +440,7 @@ else if(((!type_flag)&&(code_flag||Code_flag))||(((!code_flag)&&(!Code_flag))&&t
   fprintf(stderr, "エラー: -tオプションと-cまたは-Cオプションとは必ずセットで指定して下さい。\n");
   exit(1);
 }
-else if(((!data_flag)||(!read_flag))&&freq_flag)
+else if((!data_flag && !read_flag) && freq_flag)
 {
   fprintf(stderr, "エラー: -fオプションは-dオプションまたは-rオプションを指定した場合のみ使用できます。\n");
   exit(1);
@@ -474,40 +480,41 @@ else if(type_flag)
 
 if(data_flag)
 {
-  if((dataCount % 2) != 0)
+  if(dataCount == 0 || (dataCount % 2) != 0)
   {
-    fprintf(stderr, "エラー: データの総数は偶数である必要があります。: %d\n", dataCount);
+    fprintf(stderr, "エラー: データは空でない偶数個のバイトで指定して下さい。: %u\n", dataCount);
     exit(1);
   }
 }
 else if(Code_flag)
 {
-  str_len=strlen(Code_arg);
-  if((str_len % 2) !=0)
+  size_t str_len = strlen(Code_arg);
+  if (str_len == 0 || str_len % 2 != 0 || str_len / 2 > sizeof(code) ||
+      strspn(Code_arg, "0123456789abcdefABCDEF") != str_len)
   {
-    fprintf(stderr, "エラー: コード長は2の倍数である必要があります。: %d\n", str_len);
-    exit(1);
+    fprintf(stderr, "エラー: -C は1～%dバイトの16進数で指定して下さい。\n",
+            IR_SEND_DATA_MAX_LEN);
+    return 1;
   }
-  for(fi=0;fi<str_len / 2;fi++)
+  for (size_t pos = 0; pos < str_len; pos += 2)
   {
-    strcpy(hex_buff, "0x");
-    strncat(hex_buff, &Code_arg[fi*2], 2);
-
-    if(code != NULL){
-      code = realloc(code, codeCount + 1);
-    }else{
-      code = malloc(codeCount + 1);
-    }
-    code[codeCount++] = (byte)strtol(hex_buff, &endPtr, 0);
+    char hex_byte[] = {Code_arg[pos], Code_arg[pos + 1], '\0'};
+    code[codeCount++] = (byte)strtoul(hex_byte, NULL, 16);
   }
 }
 
+
+if (code_flag && codeCount == 0)
+{
+  fprintf(stderr, "エラー: -c には1バイト以上必要です。\n");
+  return 1;
+}
 
 /* libusb initialize*/
 ret = libusb_init(&ctx);
 if (ret < 0)
 {
-  perror("libusb_init\n");
+  fprintf(stderr, "libusb_init: %s\n", libusb_error_name(ret));
   exit(1);
 }
 
@@ -540,9 +547,6 @@ else if (stop_flag)
 }
 else if (get_flag)
 {
-    data = malloc(MAX_BYTE_ARRAY_SIZE);
-    memset(data, 0x00, MAX_BYTE_ARRAY_SIZE);
-
     if((ret = readUSBIRData(devh, data, MAX_BYTE_ARRAY_SIZE, &ibit_len))<0)
         fprintf(stderr, "error %d\n", ret);
     else
@@ -550,8 +554,8 @@ else if (get_flag)
         fprintf(stderr, "取得したbyte配列の要素数:%d=%dビット分の生データ : Freq=%dHz\n", ibit_len*4, ibit_len, frequency);
         if(ibit_len>0)
         {
-            for(fi=0;fi<ibit_len*4-1;fi++)
-                fprintf(stdout, "0x%02x,", data[fi]);
+            for(uint pos = 0; pos < ibit_len*4-1; pos++)
+                fprintf(stdout, "0x%02x,", data[pos]);
             fprintf(stdout, "0x%02x", data[ibit_len*4-1]);
         }
     }
@@ -613,16 +617,11 @@ int writeUSBIR(struct libusb_device_handle *devh, uint format_type, byte code[],
 uint reader_code = 0, bit_0 = 0, bit_1 = 0, stop_code = FORMAT_STOP_CODE;
 int i_ret = -1;
 
-int code_len_check = (int)(code_len / 8);
-if ((code_len % 8) > 0)
-{
-    code_len_check++;
-}
 // パラメータチェック
 if (devh != NULL &&
+	code != NULL &&
 	0 < code_len &&
 	code_len <= (IR_SEND_DATA_MAX_LEN*8))
-//	code.Length >= code_len_check)
 {
     switch(format_type)
     {
@@ -671,7 +670,7 @@ int writeUSBIRCode(struct libusb_device_handle *devh, uint freq, uint reader_cod
 uint fi;
 int byte_pos, bit_pos, bit_mask, tmp_data;
 int i_ret = -1;
-byte outbuffer[BUFF_SIZE];
+byte outbuffer[BUFF_SIZE] = {0};
 byte inbuffer[BUFF_SIZE];
 int BytesWritten = 0;
 int BytesRead = 0;
@@ -680,18 +679,12 @@ uint send_bit_num = 1 + bit_len + 1;    // 送信ビット数　リーダーコ�
 uint send_bit_pos = 0;                  // 送信セット済みビット位置
 uint set_bit_size = 0;
 
-int code_len_check = (int)(bit_len / 8);
-if((bit_len % 8) > 0)
-{
-    code_len_check++;
-}
 // パラメータチェック
 if (devh != NULL &&
 	IR_FREQ_MIN <= freq &&
 	freq <= IR_FREQ_MAX &&
 	0 < bit_len &&
 	bit_len <= (IR_SEND_DATA_MAX_LEN*8))
-//	repeat_code.Length >= repeat_code_len)
 {
     // データセット
     while (true)
@@ -866,7 +859,7 @@ int writeUSBIRData(struct libusb_device_handle *devh, uint freq, byte data[], ui
 {
 uint fi;
 int i_ret = -1;
-byte outbuffer[BUFF_SIZE];
+byte outbuffer[BUFF_SIZE] = {0};
 byte inbuffer[BUFF_SIZE];
 int BytesWritten = 0;
 int BytesRead = 0;
@@ -882,6 +875,7 @@ send_bit_num = data_count / 4 + (data_count % 4)/2; // 送信ビット数　リ�
 if (devh != NULL &&
 	IR_FREQ_MIN <= freq &&
 	freq <= IR_FREQ_MAX &&
+	data_count % 2 == 0 &&
 	0 < send_bit_num &&
 	send_bit_num <= (IR_SEND_DATA_MAX_LEN * 8))
     {
@@ -918,8 +912,10 @@ if (devh != NULL &&
                     outbuffer[6 + (fi * 4)] = data[send_bit_pos * 4];
                     outbuffer[6 + (fi * 4) + 1] = data[(send_bit_pos * 4) + 1];
                     // OFF Count
-                    outbuffer[6 + (fi * 4) + 2] = data[(send_bit_pos * 4) + 2];
-                    outbuffer[6 + (fi * 4) + 3] = data[(send_bit_pos * 4) + 3];
+                    // A final ON-only pair has no OFF count.
+                    uint off_pos = send_bit_pos * 4 + 2;
+                    outbuffer[6 + (fi * 4) + 2] = off_pos < data_count ? data[off_pos] : 0;
+                    outbuffer[6 + (fi * 4) + 3] = off_pos < data_count ? data[off_pos + 1] : 0;
                     send_bit_pos++;
                 }
                 if(libusb_interrupt_transfer(devh, BTO_EP_OUT, outbuffer, BUFF_SIZE ,&BytesWritten, 5000) == 0)
@@ -1204,7 +1200,7 @@ return i_ret;
 int recUSBIRData_Start(struct libusb_device_handle *devh, uint freq)
 {
 int i_ret = -1;
-byte outbuffer[BUFF_SIZE];
+byte outbuffer[BUFF_SIZE] = {0};
 byte inbuffer[BUFF_SIZE];
 int BytesWritten = 0;
 int BytesRead = 0;
@@ -1273,7 +1269,7 @@ return i_ret;
 int recUSBIRData_Stop(struct libusb_device_handle *devh)
 {
 int i_ret = -1;
-byte outbuffer[BUFF_SIZE];
+byte outbuffer[BUFF_SIZE] = {0};
 byte inbuffer[BUFF_SIZE];
 int BytesWritten = 0;
 int BytesRead = 0;
@@ -1321,7 +1317,7 @@ int readUSBIRData(struct libusb_device_handle *devh, byte data[], uint data_buff
 {
 uint fi;
 int i_ret = -1;
-byte outbuffer[BUFF_SIZE];
+byte outbuffer[BUFF_SIZE] = {0};
 byte inbuffer[BUFF_SIZE];
 int BytesWritten = 0;
 int BytesRead = 0;
@@ -1348,7 +1344,7 @@ if (devh != NULL)
             {
                 //INBuffer[0] is an echo back of the command (see microcontroller firmware).
                 //INBuffer[1] contains the I/O port pin value for the pushbutton (see microcontroller firmware).  
-                if (inbuffer[0] == 0x33)
+                if (BytesRead >= 6 && inbuffer[0] == 0x33)
                 {
                     int tmp_total_size = 0;
                     int tmp_start_pos = 0;
@@ -1358,6 +1354,10 @@ if (devh != NULL)
                     tmp_start_pos = inbuffer[3];
                     tmp_start_pos = (tmp_start_pos << 8) | inbuffer[4];
                     tmp_read_size = inbuffer[5];
+
+                    if (tmp_read_size > (BytesRead - 6) / 4 ||
+                        (uint)tmp_total_size > data_buff_len / 4)
+                        return -5;
 
                     if (tmp_total_size > 0 && tmp_total_size >= (tmp_start_pos + tmp_read_size) && tmp_read_size > 0)
                     {
@@ -1385,6 +1385,8 @@ if (devh != NULL)
                         break;
                     }
                 }
+                else
+                    return -4;
             }
             else
             {
@@ -1425,8 +1427,14 @@ if (devh != NULL)
         //Now get the response packet from the firmware.
         if(libusb_interrupt_transfer(devh, BTO_EP_IN, inbuffer, BUFF_SIZE, &BytesRead, 5000) == 0)
         {
-            fprintf(stdout, "Firmware version %5s\n", (char *)(inbuffer+1));
-            i_ret = 0;
+            if (BytesRead > 1)
+            {
+                fprintf(stdout, "Firmware version %5.*s\n", BytesRead - 1,
+                        (char *)(inbuffer + 1));
+                i_ret = 0;
+            }
+            else
+                i_ret = -4;
         }
         else
         {
